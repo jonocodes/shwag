@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+
+# set -x
+set -e
+
+CLIENT_DIR=.shwag_client
+CLIENT_CONFIG=.shwag_config
+THIS_SCRIPT=$0
+
+[[ -z $SHWAG_CLIENT_DIR ]] || CLIENT_DIR=$SHWAG_CLIENT_DIR
+[[ -z $SHWAG_CLIENT_CONFIG ]] || CLIENT_CONFIG=$SHWAG_CLIENT_CONFIG
+
+HELP="Use: $THIS_SCRIPT <operation> [args]
+
+examples:
+
+  $THIS_SCRIPT swagger-config http://petstore.swagger.io/v2/swagger.json http://petstore.swagger.io --api-key 12345
+
+  $THIS_SCRIPT getInventory
+
+  $THIS_SCRIPT swagger-update
+
+operations:
+
+  (API operation)                     Call to an API endpoint
+
+  swagger-config [spec] [host] (args) Setup what API you are going to use
+
+  swagger-help                        Help with API setup
+
+  swagger-update                      If config was run before, rerun it with the same args
+
+  swagger-update-codegen              Pull down the latest code generator
+
+  swagger-clean                       Remove the current config
+
+"
+
+function generate_client {
+
+  SPEC=$1
+
+  CHOWN=$(id -u):$(id -g)
+
+  docker run --rm -v ${PWD}:/local --entrypoint '/bin/sh' swaggerapi/swagger-codegen-cli -c "java -jar /opt/swagger-codegen-cli/swagger-codegen-cli.jar generate \
+      -i $SPEC \
+      -l bash \
+      --additional-properties scriptName=$THIS_SCRIPT \
+      --additional-properties curlOptions='-sS --tlsv1.2' \
+      --additional-properties hostEnvironmentVariable=SWAGGER_HOST \
+      --additional-properties basicAuthEnvironmentVariable=SWAGGER_BASIC_AUTH \
+      --additional-properties apiKeyAuthEnvironmentVariable=SWAGGER_API_KEY \
+      -o /local/$CLIENT_DIR && chown -R $CHOWN /local/$CLIENT_DIR"
+}
+
+case "$1" in
+  swagger-help)
+    echo "$HELP"
+    ;;
+  swagger-update)
+    source $CLIENT_CONFIG
+    generate_client $SWAGGER_SPEC
+    ;;
+  swagger-update-codegen)
+    docker pull swaggerapi/swagger-codegen-cli
+    ;;
+  swagger-clean)
+    rm -rf $CLIENT_CONFIG $CLIENT_DIR
+    ls -la
+    ;;
+  swagger-config)
+
+    POSITIONAL=()
+    while [[ $# -gt 0 ]]
+    do
+      key="$1"
+
+      case $key in
+        -b|--basic-auth) BASIC_AUTH="$2"
+        shift; shift;;
+        -k|--api-key) API_KEY="$2"
+        shift; shift;;
+        *)    # unknown option, TODO: throw away unknown key value pairs somehow
+        POSITIONAL+=("$1") # save it in an array for later
+        shift;;
+      esac
+    done
+    set -- "${POSITIONAL[@]}" # restore positional parameters
+
+    SPEC=${POSITIONAL[1]}
+    HOST=${POSITIONAL[2]}
+
+    if [[ -z $HOST ]]; then
+      echo 'host' required
+    elif [[ -z $SPEC ]]; then
+      echo 'spec' required
+    else
+
+      generate_client $SPEC
+
+      cat >$CLIENT_CONFIG <<EOL
+export SWAGGER_HOST=$HOST
+export SWAGGER_SPEC=$SPEC
+export SWAGGER_BASIC_AUTH=$BASIC_AUTH
+export SWAGGER_API_KEY=$API_KEY
+EOL
+
+      cat $CLIENT_CONFIG
+
+    fi
+
+    ;;
+  *)
+    if [[ ! -d "$CLIENT_DIR" ]] || [[ ! -f "$CLIENT_CONFIG" ]]; then
+      echo "ERROR: It appears you have not run swagger-config yet. You must do that first."
+      echo
+      echo "$HELP"
+    else
+      source $CLIENT_CONFIG
+      bash $CLIENT_DIR/$THIS_SCRIPT $@
+    fi
+    ;;
+esac
